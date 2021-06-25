@@ -8,7 +8,6 @@ Created on Thu Apr 16 16:31:32 2020
 import numpy as np
 import scipy.linalg
 import scipy.sparse.linalg
-import sys
 import jax.numpy as jnp
 import jax.ops
 import jax.lax
@@ -27,25 +26,26 @@ config.update("jax_enable_x64", True)
 
 # system
 d = 10 # dimensionality of spin chain
-h = 1. # strength of transverse field
+h = 1.0 # strength of transverse field
 alpha = 5 # number of RBM features
-iterations = 1000 # number of parameter updates
+iterations = 1001 # number of parameter updates
+relax_time = 100 # relaxation time
 
-# gd
-gd = True
-gd_min = .001
-gd_max = .01
-# sr
-sr = True
-sr_min = .001
-sr_max = .01
-sr_reg = .001
 # rgn
 rgn = True
 rgn_min = .001
 rgn_max = 1000
 reg_min = .001
 reg_max = .1
+# sr
+sr = True
+sr_min = .001
+sr_max = .01
+sr_reg = .001
+# gd
+gd = True
+gd_min = .001
+gd_max = .01
 
 # initialization
 key = random.PRNGKey(123)
@@ -53,6 +53,7 @@ key, key1, key2 = random.split(key, num = 3)
 weights_save = .001*random.normal(key1, shape = (alpha*(d + 1),)) \
     + .001j*random.normal(key2, shape = (alpha*(d + 1),))
 
+# configs
 configs = jnp.arange(2**d)[:, jnp.newaxis] >> jnp.arange(d)[::-1] & 1
 configs = configs.astype(jnp.bool_)
 
@@ -146,6 +147,150 @@ rotate = jnp.row_stack((rotate1, rotate2))/2
 
 #%%
 
+# =====================
+# MCMC training -- NRGN
+# =====================
+
+if rgn:
+
+    # starting condition
+    epsilons = np.arange(iterations)/relax_time
+    epsilons = rgn_min*(rgn_max/rgn_min)**epsilons
+    epsilons[epsilons > rgn_max] = rgn_max
+    epsilons_reset = np.copy(epsilons)
+    regs = np.arange(iterations)/relax_time
+    regs = reg_min*(reg_max/reg_min)**regs
+    regs[regs > reg_max] = reg_max
+    regs_reset = np.copy(regs)
+    weights = jnp.array(weights_save)
+
+    # storage
+    weight_log = np.zeros((iterations, weights.size)) + 0j
+    nrgn_exact = np.zeros(iterations)
+    hessian_error = np.zeros(iterations)
+
+    # update the weights
+    guidance = np.inf
+    for iteration in range(iterations):
+        print(iteration)
+
+        # process weights
+        bias = jnp.reshape(weights[-alpha:], (alpha, 1))
+        features = jnp.reshape(weights[:-alpha], (alpha, d))
+        features2 = jnp.fft.fft(features)
+        
+        # normalized wavefunction and derivatives
+        vals = jnp.exp(jansatz(configs, features2, bias))
+        vals = vals / jnp.sum(jnp.abs(vals)**2)**.5
+        g1, g2 = jgradient(configs, features2, bias)
+        grads = jnp.column_stack((jnp.reshape(g1, (-1, alpha*d)), g2))
+        grads = grads - jnp.dot(jnp.abs(vals)**2, grads)[jnp.newaxis, :]
+        grads = grads*vals[:, jnp.newaxis]
+        forces = jnp.dot(grads.conj().T, jnp.dot(matrix, vals))
+        cov = jnp.matmul(grads.conj().T, grads)
+        linear = jnp.matmul(grads.conj().T, jnp.matmul(matrix, grads))
+        linear = linear - jnp.vdot(vals, jnp.dot(matrix, vals))*cov
+        regular = linear + (cov + regs[iteration]*jnp.eye(weights.size))/epsilons[iteration]
+        
+        # check size
+        reset = False
+        move = -jnp.linalg.solve(regular, forces)
+        while np.sum(np.abs(move)**2)**.5 > 2*guidance:
+            reset = True
+            epsilons[iteration] = epsilons[iteration] / 2
+            regular = linear + (cov + regs[iteration]*jnp.eye(weights.size))/epsilons[iteration]
+            move = -jnp.linalg.solve(regular, forces)
+        weights = weights + move
+        if reset:
+            print('Resetting')
+            epsilons[iteration:] = epsilons_reset[:-iteration]
+            regs[iteration:] = regs_reset[:-iteration]
+        if iteration > 0:
+            guidance = np.sum(np.abs((weights - weight_log[iteration - 1]))**2)**.5        
+        weight_log[iteration, :] = weights
+
+        # error
+        nrgn_exact[iteration] = rayleigh(weights)
+        print('Energy error: ', nrgn_exact[iteration]/d - soln)
+        weights2 = jnp.concatenate((weights.real, weights.imag))
+        newton = hess(weights2)
+        newton = jnp.matmul(jnp.matmul(rotate, newton), rotate.conj().T)
+        error = jnp.sum(jnp.abs(newton[:weights.size, weights.size:])**2)
+        hessian_error[iteration] = 2*error/jnp.sum(jnp.abs(newton)**2)
+        print('Hessian error: ', hessian_error[iteration])
+
+    # save the results
+    np.save('nrgn_weights.npy', weight_log)
+    np.save('nrgn_exact.npy', nrgn_exact)
+    np.save('nrgn_hessian.npy', hessian_error)
+    
+    
+#%%
+
+#===================
+# MCMC training - SR
+# ==================
+
+if sr:
+
+    # starting condition
+    epsilons = np.arange(iterations)/relax_time
+    epsilons = sr_min*(sr_max/sr_min)**epsilons
+    epsilons[epsilons > sr_max] = sr_max
+    epsilons_reset = np.copy(epsilons)
+    weights = jnp.array(weights_save)
+
+    # storage
+    weight_log = np.zeros((iterations, weights.size)) + 0j
+    sr_exact = np.zeros(iterations)
+
+    # update the weights
+    guidance = np.inf
+    for iteration in range(iterations):
+        print(iteration)
+
+        # process weights
+        bias = jnp.reshape(weights[-alpha:], (alpha, 1))
+        features = jnp.reshape(weights[:-alpha], (alpha, d))
+        features2 = jnp.fft.fft(features)
+        
+        # normalized wavefunction and derivatives
+        vals = jnp.exp(jansatz(configs, features2, bias))
+        vals = vals / jnp.sum(jnp.abs(vals)**2)**.5
+        g1, g2 = jgradient(configs, features2, bias)
+        grads = jnp.column_stack((jnp.reshape(g1, (-1, alpha*d)), g2))
+        grads = grads - jnp.dot(jnp.abs(vals)**2, grads)[jnp.newaxis, :]
+        grads = grads*vals[:, jnp.newaxis]
+        forces = jnp.dot(grads.conj().T, jnp.dot(matrix, vals))
+        cov = jnp.matmul(grads.conj().T, grads)
+        regular = (cov + sr_reg*jnp.eye(weights.size))/epsilons[iteration]
+
+        # check size
+        reset = False
+        move = -jnp.linalg.solve(regular, forces)
+        while np.sum(np.abs(move)**2)**.5 > 2*guidance:
+            reset = True
+            epsilons[iteration] = epsilons[iteration] / 2
+            regular = (cov + sr_reg*jnp.eye(weights.size))/epsilons[iteration]
+            move = -jnp.linalg.solve(regular, forces)
+        weights = weights + move
+        if reset:
+            print('Resetting')
+            epsilons[iteration:] = epsilons_reset[:-iteration]
+        if iteration > 0:
+            guidance = np.sum(np.abs((weights - weight_log[iteration - 1]))**2)**.5        
+        weight_log[iteration, :] = weights
+        
+        # error
+        sr_exact[iteration] = rayleigh(weights)
+        print('Energy error: ', sr_exact[iteration]/d - soln)
+
+    # save the results
+    np.save('sr_weights.npy', weight_log)
+    np.save('sr_exact.npy', sr_exact)
+    
+#%%
+
 #====================
 # Exact training - GD
 # ===================
@@ -153,17 +298,20 @@ rotate = jnp.row_stack((rotate1, rotate2))/2
 if gd:
 
     # starting condition
-    epsilons = gd_min*(gd_max/gd_min)**np.arange(2, step = 2/iterations)
+    epsilons = np.arange(iterations)/relax_time
+    epsilons = gd_min*(gd_max/gd_min)**epsilons
     epsilons[epsilons > gd_max] = gd_max
+    epsilons_reset = np.copy(epsilons)
     weights = jnp.array(weights_save)
+
+    # storage
     weight_log = np.zeros((iterations, weights.size)) + 0j
     gd_exact = np.zeros(iterations)
 
     # update the weights 
     guidance = np.inf
     for iteration in range(iterations):
-        s = str(iteration) + '\n'
-        sys.stdout.write(s)
+        print(iteration)
 
         # process weights
         bias = jnp.reshape(weights[-alpha:], (alpha, 1))
@@ -196,147 +344,8 @@ if gd:
         
         # error
         gd_exact[iteration] = rayleigh(weights)
-        out = gd_exact[iteration]/d - soln
-        sys.stdout.write('Exact distance: %8.6e \n' % out)
+        print('Energy error: ', gd_exact[iteration]/d - soln)
             
     # save the results
     np.save('gd_weights.npy', weight_log)
     np.save('gd_exact.npy', gd_exact)
-
-
-#%%
-
-#===================
-# MCMC training - SR
-# ==================
-
-if sr:
-
-    # starting condition
-    epsilons = sr_min*(sr_max/sr_min)**np.arange(2, step = 2/iterations)
-    epsilons[epsilons > sr_max] = sr_max
-    weights = jnp.array(weights_save)
-    weight_log = np.zeros((iterations, weights.size)) + 0j
-    sr_exact = np.zeros(iterations)
-
-    # update the weights
-    guidance = np.inf
-    for iteration in range(iterations):
-        s = str(iteration) + '\n'
-        sys.stdout.write(s)
-
-        # process weights
-        bias = jnp.reshape(weights[-alpha:], (alpha, 1))
-        features = jnp.reshape(weights[:-alpha], (alpha, d))
-        features2 = jnp.fft.fft(features)
-        
-        # normalized wavefunction and derivatives
-        vals = jnp.exp(jansatz(configs, features2, bias))
-        vals = vals / jnp.sum(jnp.abs(vals)**2)**.5
-        g1, g2 = jgradient(configs, features2, bias)
-        grads = jnp.column_stack((jnp.reshape(g1, (-1, alpha*d)), g2))
-        grads = grads - jnp.dot(jnp.abs(vals)**2, grads)[jnp.newaxis, :]
-        grads = grads*vals[:, jnp.newaxis]
-        forces = jnp.dot(grads.conj().T, jnp.dot(matrix, vals))
-        cov = jnp.matmul(grads.conj().T, grads)
-        regular = (cov + sr_reg*jnp.eye(weights.size))/epsilons[iteration]
-
-        # check size
-        reset = False
-        move = -jnp.linalg.solve(regular, forces)
-        while np.sum(np.abs(move)**2)**.5 > 2*guidance:
-            reset = True
-            epsilons[iteration] = epsilons[iteration] / 2
-            regular = (cov + sr_reg*jnp.eye(weights.size))/epsilons[iteration]
-            move = -jnp.linalg.solve(regular, forces)
-        weights = weights + move
-        if reset:
-            print('Resetting')
-            epsilons[iteration:] = epsilons[:-iteration]
-        if iteration > 0:
-            guidance = np.sum(np.abs((weights - weight_log[iteration - 1]))**2)**.5        
-        weight_log[iteration, :] = weights
-        
-        # error
-        sr_exact[iteration] = rayleigh(weights)
-        out = sr_exact[iteration]/d - soln
-        sys.stdout.write('Exact distance: %8.6e \n' % out)
-
-    # save the results
-    np.save('sr_weights.npy', weight_log)
-    np.save('sr_exact.npy', sr_exact)
-    
-#%%
-
-# =====================
-# MCMC training -- NRGN
-# =====================
-
-if rgn:
-
-    # starting condition
-    epsilons = rgn_min*(rgn_max/rgn_min)**np.arange(2, step = 2/iterations)
-    epsilons[epsilons > rgn_max] = rgn_max
-    regs = reg_min*(reg_max/reg_min)**np.arange(2, step = 2/iterations)
-    regs[regs > reg_max] = reg_max
-    weights = jnp.array(weights_save)
-    weight_log = np.zeros((iterations, weights.size)) + 0j
-    nrgn_exact = np.zeros(iterations)
-    hessian_error = np.zeros(iterations)
-
-    # update the weights
-    guidance = np.inf
-    for iteration in range(iterations):
-        s = str(iteration) + '\n'
-        sys.stdout.write(s)
-
-        # process weights
-        bias = jnp.reshape(weights[-alpha:], (alpha, 1))
-        features = jnp.reshape(weights[:-alpha], (alpha, d))
-        features2 = jnp.fft.fft(features)
-        
-        # normalized wavefunction and derivatives
-        vals = jnp.exp(jansatz(configs, features2, bias))
-        vals = vals / jnp.sum(jnp.abs(vals)**2)**.5
-        g1, g2 = jgradient(configs, features2, bias)
-        grads = jnp.column_stack((jnp.reshape(g1, (-1, alpha*d)), g2))
-        grads = grads - jnp.dot(jnp.abs(vals)**2, grads)[jnp.newaxis, :]
-        grads = grads*vals[:, jnp.newaxis]
-        forces = jnp.dot(grads.conj().T, jnp.dot(matrix, vals))
-        cov = jnp.matmul(grads.conj().T, grads)
-        linear = jnp.matmul(grads.conj().T, jnp.matmul(matrix, grads))
-        linear = linear - jnp.vdot(vals, jnp.dot(matrix, vals))*cov
-        regular = linear + jnp.eye(weights.size)/epsilons[iteration]
-        
-        # check size
-        reset = False
-        move = -jnp.linalg.solve(regular, forces)
-        while np.sum(np.abs(move)**2)**.5 > 2*guidance:
-            reset = True
-            epsilons[iteration] = epsilons[iteration] / 2
-            regular = linear + (cov + regs[iteration]*jnp.eye(weights.size))/epsilons[iteration]
-            move = -jnp.linalg.solve(regular, forces)
-        weights = weights + move
-        if reset:
-            print('Resetting')
-            epsilons[iteration:] = epsilons[:-iteration]
-            regs[iteration:] = regs[:-iteration]
-        if iteration > 0:
-            guidance = np.sum(np.abs((weights - weight_log[iteration - 1]))**2)**.5        
-        weight_log[iteration, :] = weights
-
-        # error
-        nrgn_exact[iteration] = rayleigh(weights)
-        out = nrgn_exact[iteration]/d - soln
-        sys.stdout.write('Exact distance: %8.6e \n' % out)
-        weights2 = jnp.concatenate((weights.real, weights.imag))
-        newton = hess(weights2)
-        newton = jnp.matmul(jnp.matmul(rotate, newton), rotate.conj().T)
-        error = jnp.sum(jnp.abs(newton[:weights.size, weights.size:])**2)
-        hessian_error[iteration] = 2*error/jnp.sum(jnp.abs(newton)**2)
-        print('Hessian error: ', hessian_error[iteration])
-
-    # save the results
-    np.save('nrgn_weights.npy', weight_log)
-    np.save('nrgn_exact.npy', nrgn_exact)
-    np.save('nrgn_hessian.npy', hessian_error)

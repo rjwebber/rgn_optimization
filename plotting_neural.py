@@ -206,7 +206,7 @@ fig.savefig('fig1.pdf', bbox_inches = 'tight', dpi = 200)
 # choose what to plot
 d = 10
 folder = 'deterministic/'
-ymin = 1e-9
+ymin = 1e-10
 ymax = 1
 iterations = 1001
         
@@ -315,7 +315,7 @@ fig.savefig('fig3.pdf', bbox_inches = 'tight', dpi = 200)
 # choose what to plot
 d = 100
 folder = 'xxz_100x1/'
-ymin = 1e-9
+ymin = 1e-8
 ymax = 1
 iterations = 1001
         
@@ -376,7 +376,7 @@ fig.savefig('fig4.pdf', bbox_inches = 'tight', dpi = 200)
 # choose what to plot
 d = 100
 folder = 'xxz_100x1_temper/'
-ymin = 1e-9
+ymin = 1e-8
 ymax = 1
 iterations = 1001
         
