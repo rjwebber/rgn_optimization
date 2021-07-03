@@ -54,7 +54,7 @@ gd_max = .01
 # random seeds
 cores = jax.local_device_count()
 print('Cores:', cores)
-key = random.PRNGKey(456)
+key = random.PRNGKey(123)
 key, key1, key2, key3 = random.split(key, num = 4)
 key_save = random.split(key, cores)
 

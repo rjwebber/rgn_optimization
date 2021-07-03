@@ -59,8 +59,8 @@ key, key1, key2, key3 = random.split(key, num = 4)
 key_save = random.split(key, cores)
 
 # random weights
-weights_save = .0001*random.normal(key1, shape = (alpha*(d**2 + 1),)) \
-    + .0001j*random.normal(key2, shape = (alpha*(d**2 + 1),))
+weights_save = .001*random.normal(key1, shape = (alpha*(d**2 + 1),)) \
+    + .001j*random.normal(key2, shape = (alpha*(d**2 + 1),))
 
 # random states
 states_save = random.choice(key3, jnp.array([True, False]), 
