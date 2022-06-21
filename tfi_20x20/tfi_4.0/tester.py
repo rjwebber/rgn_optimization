@@ -34,7 +34,8 @@ T = 20 # number of steps per MC chain
 
 # rgn
 rgn = True
-reg_max = .1
+# lm
+lm = False
 # sr
 sr = True
 # gd
@@ -138,10 +139,10 @@ def update(inputs, i):
     futures = jnp.real(jansatz(perturbs, features2, bias))
     accept = random.exponential(key3, shape = (parallel,))
     accept = (futures - currents > -.5*accept)
+    accept2 = jnp.broadcast_to(accept[:, jnp.newaxis, jnp.newaxis], (parallel, d, d))
     # update information
-    currents = currents * ~accept + futures * accept
-    accept = accept[:, jnp.newaxis, jnp.newaxis]
-    states = (states & ~accept) | (perturbs & accept)
+    currents = jnp.where(accept, futures, currents)
+    states = jnp.where(accept2, perturbs, states)
     return (states, currents, key, features2, bias), None
 
 #%%
@@ -154,8 +155,8 @@ if rgn:
 
     # starting condition
     key = jnp.array(key_save)
-    weights = jnp.load('nrgn_weights.npy')[-1, :]
-    states = jnp.load('nrgn_save_1000.npy')
+    weights = jnp.load('rgn_weights.npy')[200, :]
+    states = jnp.load('rgn_save_200.npy')
     rgn_est = np.zeros(iterations) + 0j
 
     # test the energy
@@ -166,8 +167,32 @@ if rgn:
         print('Estimated energy: ', rgn_est[iteration]/d**2)
         if iteration % 100 == 0:
             if iteration > 0:
-                np.save('nrgn_test.npy', rgn_est)
+                np.save('rgn_test_short.npy', rgn_est)
                     
+#%%
+
+# =====================
+# MCMC testing -- LM
+# =====================
+
+if lm:
+
+    # starting condition
+    key = jnp.array(key_save)
+    weights = jnp.load('lm_weights.npy')[200, :]
+    states = jnp.load('lm_save_200.npy')
+    rgn_est = np.zeros(iterations) + 0j
+
+    # test the energy
+    for iteration in range(iterations):
+        print(iteration)
+        (states, key, store_energy) = parallel_data(states, key, weights)
+        rgn_est[iteration] = jnp.mean(store_energy)
+        print('Estimated energy: ', rgn_est[iteration]/d**2)
+        if iteration % 100 == 0:
+            if iteration > 0:
+                np.save('lm_test_short.npy', rgn_est)
+
 #%%
 
 #===================
@@ -178,8 +203,8 @@ if sr:
 
     # starting condition
     key = jnp.array(key_save)
-    weights = jnp.load('sr_weights.npy')[-1, :]
-    states = jnp.load('sr_save_1000.npy')
+    weights = jnp.load('sr_weights.npy')[200, :]
+    states = jnp.load('sr_save_200.npy')
     sr_est = np.zeros(iterations) + 0j
 
     # test the energy
@@ -190,7 +215,7 @@ if sr:
         print('Estimated energy: ', sr_est[iteration]/d**2)
         if iteration % 100 == 0:
             if iteration > 0:
-                np.save('sr_test.npy', sr_est)
+                np.save('sr_test_short.npy', sr_est)
                     
 #%%
 
@@ -202,8 +227,8 @@ if gd:
 
     # starting condition
     key = jnp.array(key_save)
-    weights = jnp.load('gd_weights.npy')[-1, :]
-    states = jnp.load('gd_save_1000.npy')
+    weights = jnp.load('gd_weights.npy')[200, :]
+    states = jnp.load('gd_save_200.npy')
     gd_est = np.zeros(iterations) + 0j
 
     # test the energy
@@ -214,4 +239,4 @@ if gd:
         print('Estimated energy: ', gd_est[iteration]/d**2)
         if iteration % 100 == 0:
             if iteration > 0:
-                np.save('gd_test.npy', gd_est)
+                np.save('gd_test_short.npy', gd_est)

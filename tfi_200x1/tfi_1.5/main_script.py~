@@ -10,7 +10,6 @@ os.environ['XLA_FLAGS'] = f"--xla_force_host_platform_device_count=48"
 import numpy as np
 import scipy.linalg
 import scipy.sparse.linalg
-import sys
 import jax.numpy as jnp
 import jax.ops
 import jax.lax
@@ -31,37 +30,46 @@ config.update("jax_enable_x64", True)
 d = 200 # dimensionality of spin chain
 h = 1.5 # strength of transverse field
 alpha = 5 # number of RBM features
-iterations = 1000 # number of parameter updates
-parallel = 200 # number of parallel MC chains
-T = 10 # number of steps per MC chain
+iterations = 1001 # number of parameter updates
+relax_time = 500 # relaxation time
+parallel = 50 # number of parallel MC chains
+T = 20 # number of steps per MC chain
 
-# gd
-gd = False
-gd_min = .001
-gd_max = .01
-# sr
-sr = False
-sr_min = .001
-sr_max = .01
-sr_reg = .001
 # rgn
 rgn = True
 rgn_min = .001
 rgn_max = 1000
 reg_min = .001
 reg_max = .1
+# lm
+lm = False
+lm_min = .001
+lm_max = 10
+# sr
+sr = False
+sr_min = .001
+sr_max = .01
+sr_reg = .001
+# gd
+gd = False
+gd_min = .001
+gd_max = .01
 
-# initialization
-key = random.PRNGKey(123)
-key, key1, key2, key3 = random.split(key, num = 4)
-weights_save = .001*random.normal(key1, shape = (alpha*(d + 1),)) \
-    + .001j*random.normal(key2, shape = (alpha*(d + 1),))
+# random seeds
 cores = jax.local_device_count()
 print('Cores:', cores)
+key = random.PRNGKey(123)
+key, key1, key2, key3 = random.split(key, num = 4)
+key_save = random.split(key, cores)
+
+# random weights
+weights_save = .001*random.normal(key1, shape = (alpha*(d + 1),)) \
+    + .001j*random.normal(key2, shape = (alpha*(d + 1),))
+
+# random states
 states_save = random.choice(key3, jnp.array([True, False]), shape = (cores, parallel, d))
 flips = (2*jnp.sum(states_save, axis = -1) + states_save[..., 0] > d)
 states_save = states_save ^ jnp.expand_dims(flips, -1)
-key_save = random.split(key, cores)
 
 # =============
 # True solution
@@ -112,7 +120,7 @@ if d <= 20:
         features = jnp.reshape(weights[:-alpha], (alpha, d))
         features2 = jnp.fft.fft(features)
         y = jnp.exp(jansatz(configs, features2, bias))
-        return(jnp.vdot(y, matrix.dot(y))/jnp.vdot(y, y))
+        return(jnp.real(jnp.vdot(y, matrix.dot(y))/jnp.vdot(y, y)))
 
 #%%
 
@@ -273,9 +281,10 @@ def update(inputs, i):
     futures = jnp.real(jansatz(perturbs, features2, bias))
     accept = random.exponential(key2, shape = (parallel,))
     accept = (futures - currents > -.5*accept)
+    accept2 = jnp.broadcast_to(accept[:, jnp.newaxis], (parallel, d))
     # update information
-    states = (states & ~accept[:, jnp.newaxis]) | (perturbs & accept[:, jnp.newaxis])
-    currents = currents * ~accept + futures * accept
+    currents = jnp.where(accept, futures, currents)
+    states = jnp.where(accept2, perturbs, states)
     return (states, currents, key, features2, bias), None
 
 # ======================
@@ -293,7 +302,6 @@ def gd_multi(states, weights, key, epsilon, guidance):
     ave = jnp.mean(store_energy)
     store_energy = store_energy - ave
     var = jnp.mean(np.abs(store_energy)**2)
-    max_dev = jnp.max(jnp.abs(store_energy))/var**.5
     store_grad = store_grad - jnp.mean(store_grad, axis = 0)
     forces = jnp.dot(store_grad.conj().T, store_energy)/store_energy.size
 
@@ -307,7 +315,7 @@ def gd_multi(states, weights, key, epsilon, guidance):
         
     # make a move
     weights = weights + move
-    return(states, weights, key, ave, var, max_dev, reset)
+    return(states, weights, key, ave, var, reset)
 
 def sr_multi(states, weights, key, epsilon, guidance):
     
@@ -320,11 +328,10 @@ def sr_multi(states, weights, key, epsilon, guidance):
     ave = jnp.mean(store_energy)
     store_energy = store_energy - ave
     var = jnp.mean(np.abs(store_energy)**2)
-    max_dev = jnp.max(jnp.abs(store_energy))/var**.5
     store_grad = store_grad - jnp.mean(store_grad, axis = 0)
     forces = jnp.dot(store_grad.conj().T, store_energy)/store_energy.size
     cov = jnp.matmul(store_grad.conj().T, store_grad)/store_energy.size
-    regular = (cov + sr_reg*jnp.eye(weights.size))/epsilon
+    regular = (cov + sr_reg*jnp.eye(alpha*(d + 1)))/epsilon
 
     # check size
     reset = False
@@ -332,12 +339,12 @@ def sr_multi(states, weights, key, epsilon, guidance):
     while np.sum(np.abs(move)**2)**.5 > 2*guidance:
         reset = True
         epsilon = epsilon / 2
-        regular = (cov + sr_reg*jnp.eye(weights.size))/epsilon
+        regular = (cov + sr_reg*jnp.eye(alpha*(d + 1)))/epsilon
         move = -jnp.linalg.solve(regular, forces)
 
     # make a move
     weights = weights + move
-    return(states, weights, key, ave, var, max_dev, reset)
+    return(states, weights, key, ave, var, reset)
 
 def rgn_multi(states, weights, key, epsilon, reg, guidance):
 
@@ -352,7 +359,6 @@ def rgn_multi(states, weights, key, epsilon, reg, guidance):
     ave = jnp.mean(store_energy)
     store_energy = store_energy - ave
     var = jnp.mean(np.abs(store_energy)**2)
-    max_dev = jnp.max(jnp.abs(store_energy))/var**.5
     ave_grad = jnp.mean(store_grad, axis = 0)
     store_grad = store_grad - ave_grad
     store_ham = store_ham - jnp.mean(store_ham, axis = 0)
@@ -360,7 +366,7 @@ def rgn_multi(states, weights, key, epsilon, reg, guidance):
     cov = jnp.matmul(store_grad.conj().T, store_grad)/store_energy.size
     linear = jnp.dot(store_grad.conj().T, store_ham)/store_energy.size
     linear = linear - jnp.outer(forces, ave_grad) - ave*cov
-    regular = linear + (cov + reg*jnp.eye(weights.size))/epsilon
+    regular = linear + (cov + reg*jnp.eye(alpha*(d + 1)))/epsilon
 
     # check size
     reset = False
@@ -368,72 +374,179 @@ def rgn_multi(states, weights, key, epsilon, reg, guidance):
     while np.sum(np.abs(move)**2)**.5 > 2*guidance:
         reset = True
         epsilon = epsilon / 2
-        regular = linear + (cov + reg*jnp.eye(weights.size))/epsilon
+        regular = linear + (cov + reg*jnp.eye(alpha*(d + 1)))/epsilon
         move = -jnp.linalg.solve(regular, forces)
 
     # make a move
     weights = weights + move
-    return(states, weights, key, ave, var, max_dev, reset)
+    return(states, weights, key, ave, var, reset)
+
+def lm_multi(states, weights, key, epsilon, reg, guidance):
+
+    # get data
+    (states, key, store_grad, store_energy, store_ham) = \
+        parallel_more_data(states, key, weights)
+    store_grad = jnp.reshape(store_grad, (-1, alpha*(d + 1)))
+    store_energy = jnp.reshape(store_energy, (-1,))
+    store_ham = jnp.reshape(store_ham, (-1, alpha*(d + 1)))
+
+    # form matrices
+    ave = jnp.mean(store_energy)
+    store_energy = store_energy - ave
+    var = jnp.mean(np.abs(store_energy)**2)
+    ave_grad = jnp.mean(store_grad, axis = 0)
+    store_grad = store_grad - ave_grad
+    store_ham = store_ham - jnp.mean(store_ham, axis = 0)
+    forces = jnp.dot(store_grad.conj().T, store_energy)/store_energy.size
+    cov = jnp.matmul(store_grad.conj().T, store_grad)/store_energy.size
+    linear = jnp.dot(store_grad.conj().T, store_ham)/store_energy.size
+    linear = linear - jnp.outer(forces, ave_grad) - ave*cov
+    cov = jnp.block([[1, jnp.zeros((alpha*(d + 1),))],
+        [jnp.zeros((alpha*(d + 1),1)), cov + reg*jnp.eye(alpha*(d + 1))]])
+
+    # check size
+    reset = False
+    regular = jnp.block([[0, forces.conj()],
+        [jnp.expand_dims(forces, -1), linear + jnp.eye(alpha*(d + 1))/epsilon]])
+    _, vecs = scipy.linalg.eigh(regular, cov)
+    move = vecs[1:, 0]
+    while np.sum(np.abs(move)**2)**.5 > 2*guidance:
+        reset = True
+        epsilon = epsilon / 2
+        regular = jnp.block([[0, forces.conj()],
+            [jnp.expand_dims(forces, -1), linear + jnp.eye(alpha*(d + 1))/epsilon]])
+        _, vecs = scipy.linalg.eigh(regular, cov)
+        move = vecs[1:, 0]
+
+    # make a move
+    weights = weights + move
+    return(states, weights, key, ave, var, reset)
 
 #%%
 
-#===================
-# MCMC training - GD
-# ==================
+# =====================
+# MCMC training -- RGN
+# =====================
 
-if gd:
+if rgn:
 
     # starting condition
-    epsilons = gd_min*(gd_max/gd_min)**np.arange(2, step = 2/iterations)
-    epsilons[epsilons > gd_max] = gd_max
+    epsilons = np.arange(iterations)/relax_time
+    epsilons = rgn_min*(rgn_max/rgn_min)**epsilons
+    epsilons[epsilons > rgn_max] = rgn_max
+    epsilons_reset = np.copy(epsilons)
+    regs = np.arange(iterations)/relax_time
+    regs = reg_min*(reg_max/reg_min)**regs
+    regs[regs > reg_max] = reg_max
+    regs_reset = np.copy(regs)
     key = jnp.array(key_save)
     weights = jnp.array(weights_save)
     states = jnp.array(states_save)
-    weight_log = np.zeros((iterations, weights.size))
-    gd_est = np.zeros(iterations) + 0j
-    gd_var = np.zeros(iterations)
-    gd_dev = np.zeros(iterations)
-    if d <= 10:
-        gd_exact = np.zeros(iterations)
 
-    # update the weights 
+    # storage
+    weight_log = np.zeros((iterations, alpha*(d + 1))) + 0j
+    rgn_est = np.zeros(iterations) + 0j
+    rgn_var = np.zeros(iterations)
+    if d <= 20:
+        rgn_exact = np.zeros(iterations)
+
+    # update the weights
     guidance = np.inf
     for iteration in range(iterations):
-        s = str(iteration) + '\n'
-        sys.stdout.write(s)
-        (states, weights, key, gd_est[iteration], gd_var[iteration],
-         gd_dev[iteration], reset) = \
-            gd_multi(states, weights, key, epsilons[iteration], guidance)
+        print(iteration)
+        (states, weights, key, rgn_est[iteration], 
+         rgn_var[iteration], reset) = \
+            rgn_multi(states, weights, key, 
+                      epsilons[iteration], regs[iteration], guidance)
         if reset:
             print('Resetting')
-            np.save('gd_error_' + str(iteration) + '.npy', states)
-            epsilons[iteration:] = epsilons[:-iteration]
-        if iteration % 100 == 0:
-            if iteration > 0:
-                np.save('gd_save_' + str(iteration) + '.npy', states)
+            np.save('rgn_error_' + str(iteration) + '.npy', states)
+            epsilons[iteration:] = epsilons_reset[:-iteration]
+            regs[iteration:] = regs_reset[:-iteration]
         if iteration > 0:
-            guidance = np.sum(np.abs((weights - weight_log[iteration - 1]))**2)**.5        
+            guidance = np.sum(np.abs((weights - weight_log[iteration - 1, :]))**2)**.5
         weight_log[iteration, :] = weights
-        out = gd_est[iteration]/d
-        sys.stdout.write('Estimated energy: %8.6e \n' % out)
-        print('Estimated variance: ', gd_var[iteration]/d**2)
-        print('Maximum deviation: ', gd_dev[iteration])
         
+        # report progress
+        print('Estimated energy: ', rgn_est[iteration]/d)
+        print('Energy variance: ', rgn_var[iteration]/d**2)
         # compare to truth
-        if d <= 10:
-            out = (gd_est[iteration] - soln[0][0])/d
-            sys.stdout.write('Estimated distance: %8.6e \n' % out)        
-            gd_exact[iteration] = rayleigh(weights)
-            out = (gd_exact[iteration] - soln[0][0])/d
-            sys.stdout.write('Exact distance: %8.6e \n' % out)
+        if d <= 20:
+            rgn_exact[iteration] = rayleigh(weights)
+            print('Exact error: ', (rgn_exact[iteration] - soln[0][0])/d)
 
         # save the results
-        np.save('gd_weights.npy', weight_log)
-        np.save('gd_est.npy', gd_est)
-        np.save('gd_var.npy', gd_var)
-        np.save('gd_dev.npy', gd_dev)
-        if d <= 10:
-            np.save('gd_exact.npy', gd_exact)
+        if iteration % 100 == 0:
+            if iteration > 0:
+                np.save('rgn_save_' + str(iteration) + '.npy', states)
+                np.save('rgn_weights.npy', weight_log)
+                np.save('rgn_est.npy', rgn_est)
+                np.save('rgn_var.npy', rgn_var)
+                if d <= 20:
+                    np.save('rgn_exact.npy', rgn_exact)
+                    
+#%%
+
+# =====================
+# MCMC training -- LM
+# =====================
+
+if lm:
+
+    # starting condition
+    epsilons = np.arange(iterations)/relax_time
+    epsilons = lm_min*(lm_max/lm_min)**epsilons
+    epsilons[epsilons > lm_max] = lm_max
+    epsilons_reset = np.copy(epsilons)
+    regs = np.arange(iterations)/relax_time
+    regs = reg_min*(reg_max/reg_min)**regs
+    regs[regs > reg_max] = reg_max
+    regs_reset = np.copy(regs)
+    key = jnp.array(key_save)
+    weights = jnp.array(weights_save)
+    states = jnp.array(states_save)
+
+    # storage
+    weight_log = np.zeros((iterations, alpha*(d + 1))) + 0j
+    lm_est = np.zeros(iterations) + 0j
+    lm_var = np.zeros(iterations)
+    if d <= 20:
+        lm_exact = np.zeros(iterations)
+
+    # update the weights
+    guidance = np.inf
+    for iteration in range(iterations):
+        print(iteration)
+        (states, weights, key, lm_est[iteration], 
+         lm_var[iteration], reset) = \
+            lm_multi(states, weights, key, 
+                      epsilons[iteration], regs[iteration], guidance)
+        if reset:
+            print('Resetting')
+            np.save('lm_error_' + str(iteration) + '.npy', states)
+            epsilons[iteration:] = epsilons_reset[:-iteration]
+            regs[iteration:] = regs_reset[:-iteration]
+        if iteration > 0:
+            guidance = np.sum(np.abs((weights - weight_log[iteration - 1, :]))**2)**.5
+        weight_log[iteration, :] = weights
+        
+        # report progress
+        print('Estimated energy: ', lm_est[iteration]/d)
+        print('Energy variance: ', lm_var[iteration]/d**2)
+        # compare to truth
+        if d <= 20:
+            lm_exact[iteration] = rayleigh(weights)
+            print('Exact error: ', (lm_exact[iteration] - soln[0][0])/d)
+
+        # save the results
+        if iteration % 100 == 0:
+            if iteration > 0:
+                np.save('lm_save_' + str(iteration) + '.npy', states)
+                np.save('lm_weights.npy', weight_log)
+                np.save('lm_est.npy', lm_est)
+                np.save('lm_var.npy', lm_var)
+                if d <= 20:
+                    np.save('lm_exact.npy', lm_exact)
 
 #%%
 
@@ -444,116 +557,105 @@ if gd:
 if sr:
 
     # starting condition
-    epsilons = sr_min*(sr_max/sr_min)**np.arange(2, step = 2/iterations)
+    epsilons = np.arange(iterations)/relax_time
+    epsilons = sr_min*(sr_max/sr_min)**epsilons
     epsilons[epsilons > sr_max] = sr_max
+    epsilons_reset = np.copy(epsilons)
     key = jnp.array(key_save)
     weights = jnp.array(weights_save)
     states = jnp.array(states_save)
-    weight_log = np.zeros((iterations, weights.size))
+
+    # storage
+    weight_log = np.zeros((iterations, alpha*(d + 1))) + 0j
     sr_est = np.zeros(iterations) + 0j
     sr_var = np.zeros(iterations)
-    sr_dev = np.zeros(iterations)
-    if d <= 10:
+    if d <= 20:
         sr_exact = np.zeros(iterations)
 
     # update the weights
     guidance = np.inf
     for iteration in range(iterations):
-        s = str(iteration) + '\n'
-        sys.stdout.write(s)
-        (states, weights, key, sr_est[iteration], sr_var[iteration],
-         sr_dev[iteration], reset) = \
+        print(iteration)
+        (states, weights, key, sr_est[iteration], 
+         sr_var[iteration], reset) = \
             sr_multi(states, weights, key, epsilons[iteration], guidance)
         if reset:
             print('Resetting')
             np.save('sr_error_' + str(iteration) + '.npy', states)
-            epsilons[iteration:] = epsilons[:-iteration]
+            epsilons[iteration:] = epsilons_reset[:-iteration]
+        if iteration > 0:
+            guidance = np.sum(np.abs((weights - weight_log[iteration - 1, :]))**2)**.5        
+        weight_log[iteration, :] = weights
+        
+        # report progress
+        print('Estimated energy: ', sr_est[iteration]/d)
+        print('Energy variance: ', sr_var[iteration]/d**2)
+        if d <= 20:
+            sr_exact[iteration] = rayleigh(weights)
+            print('Exact denergy difference: ', (sr_exact[iteration] - soln[0][0])/d)
+
+        # save the results
         if iteration % 100 == 0:
             if iteration > 0:
                 np.save('sr_save_' + str(iteration) + '.npy', states)
-        if iteration > 0:
-            guidance = np.sum(np.abs((weights - weight_log[iteration - 1]))**2)**.5        
-        weight_log[iteration, :] = weights
-        out = sr_est[iteration]/d
-        sys.stdout.write('Estimated energy: %8.6e \n' % out)
-        print('Estimated variance: ', sr_var[iteration]/d**2)
-        print('Maximum deviation: ', sr_dev[iteration])
-        
-        # compare to truth
-        if d <= 10:
-            out = (sr_est[iteration] - soln[0][0])/d
-            sys.stdout.write('Estimated distance: %8.6e \n' % out)
-            sr_exact[iteration] = rayleigh(weights)
-            out = (sr_exact[iteration] - soln[0][0])/d
-            sys.stdout.write('Exact distance: %8.6e \n' % out)
-
-        # save the results
-        np.save('sr_weights.npy', weight_log)
-        np.save('sr_est.npy', sr_est)
-        np.save('sr_var.npy', sr_var)
-        np.save('sr_dev.npy', sr_dev)
-        if d <= 10:
-            np.save('sr_exact.npy', sr_exact)
-    
+                np.save('sr_weights.npy', weight_log)
+                np.save('sr_est.npy', sr_est)
+                np.save('sr_var.npy', sr_var)
+                if d <= 20:
+                    np.save('sr_exact.npy', sr_exact)
+                    
 #%%
 
-# =====================
-# MCMC training -- NRGN
-# =====================
+#===================
+# MCMC training - GD
+# ==================
 
-if rgn:
+if gd:
 
     # starting condition
-    epsilons = rgn_min*(rgn_max/rgn_min)**np.arange(2, step = 2/iterations)
-    epsilons[epsilons > rgn_max] = rgn_max
-    regs = reg_min*(reg_max/reg_min)**np.arange(2, step = 2/iterations)
-    regs[regs > reg_max] = reg_max
+    epsilons = np.arange(iterations)/relax_time
+    epsilons = gd_min*(gd_max/gd_min)**epsilons
+    epsilons[epsilons > gd_max] = gd_max
+    epsilons_reset = np.copy(epsilons)
     key = jnp.array(key_save)
     weights = jnp.array(weights_save)
     states = jnp.array(states_save)
-    weight_log = np.zeros((iterations, weights.size))
-    nrgn_est = np.zeros(iterations) + 0j
-    nrgn_var = np.zeros(iterations)
-    nrgn_dev = np.zeros(iterations)
-    if d <= 10:
-        nrgn_exact = np.zeros(iterations)
 
-    # update the weights
+    # storage
+    weight_log = np.zeros((iterations, alpha*(d + 1)))
+    gd_est = np.zeros(iterations) + 0j
+    gd_var = np.zeros(iterations)
+    if d <= 20:
+        gd_exact = np.zeros(iterations)
+
+    # update the weights 
     guidance = np.inf
     for iteration in range(iterations):
-        s = str(iteration) + '\n'
-        sys.stdout.write(s)
-        (states, weights, key, nrgn_est[iteration], nrgn_var[iteration], 
-         nrgn_dev[iteration], reset) = \
-            rgn_multi(states, weights, key, epsilons[iteration], regs[iteration], guidance)
+        print(iteration)
+        (states, weights, key, gd_est[iteration], 
+         gd_var[iteration], reset) = \
+            gd_multi(states, weights, key, epsilons[iteration], guidance)
         if reset:
             print('Resetting')
-            np.save('nrgn_error_' + str(iteration) + '.npy', states)
-            epsilons[iteration:] = epsilons[:-iteration]
-            regs[iteration:] = regs[:-iteration]
-        if iteration % 100 == 0:
-            if iteration > 0:
-                np.save('nrgn_save_' + str(iteration) + '.npy', states)
+            np.save('gd_error_' + str(iteration) + '.npy', states)
+            epsilons[iteration:] = epsilons_reset[:-iteration]
         if iteration > 0:
-            guidance = np.sum(np.abs((weights - weight_log[iteration - 1]))**2)**.5        
+            guidance = np.sum(np.abs((weights - weight_log[iteration - 1, :]))**2)**.5        
         weight_log[iteration, :] = weights
-        out = nrgn_est[iteration]/d
-        sys.stdout.write('Estimated energy: %8.6e \n' % out)
-        print('Estimated variance: ', nrgn_var[iteration]/d**2)
-        print('Maximum deviation: ', nrgn_dev[iteration])
 
-        # compare to truth
-        if d <= 10:
-            out = (nrgn_est[iteration] - soln[0][0])/d
-            sys.stdout.write('Estimated distance: %8.6e \n' % out)
-            nrgn_exact[iteration] = rayleigh(weights)
-            out = (nrgn_exact[iteration] - soln[0][0])/d
-            sys.stdout.write('Exact distance: %8.6e \n' % out)
+        # report progress
+        print('Estimated energy: ', gd_est[iteration]/d)
+        print('Energy variance: ', gd_var[iteration]/d**2)
+        if d <= 20:
+            gd_exact[iteration] = rayleigh(weights)
+            print('Exact error: ', (gd_exact[iteration] - soln[0][0])/d)
 
         # save the results
-        np.save('nrgn_weights.npy', weight_log)
-        np.save('nrgn_est.npy', nrgn_est)
-        np.save('nrgn_var.npy', nrgn_var)
-        np.save('nrgn_dev.npy', nrgn_dev)
-        if d <= 10:
-            np.save('nrgn_exact.npy', nrgn_exact)
+        if iteration % 100 == 0:
+            if iteration > 0:
+                np.save('gd_save_' + str(iteration) + '.npy', states)
+                np.save('gd_weights.npy', weight_log)
+                np.save('gd_est.npy', gd_est)
+                np.save('gd_var.npy', gd_var)
+                if d <= 20:
+                    np.save('gd_exact.npy', gd_exact)

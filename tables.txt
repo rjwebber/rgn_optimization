@@ -1,48 +1,39 @@
+
+200 x 1 TFI model
 h =  0.5
-SR rel. error:  3.8673763980571155e-05
-RGN rel. error:  1.0204272096461993e-09
-Error ratio:  37899.581288096044 
-
+SR rel. error: 3.9e-05
+RGN rel. error: 1.0e-09
 h =  1.0
-SR rel. error:  0.0001443974286450568
-RGN rel. error:  2.8895639923861484e-06
-Error ratio:  49.97204734885144 
-
+SR rel. error: 1.4e-04
+RGN rel. error: 2.9e-06
 h =  1.5
-SR rel. error:  8.455684436662279e-08
-RGN rel. error:  1.589015596015595e-09
-Error ratio:  53.2133508183597 
+SR rel. error: 8.5e-08
+RGN rel. error: 1.6e-09
 
+100 x 1 XXZ model
 Delta =  0.5
-RGN rel. error:  2.580546907488137e-07
-SR rel. error:  3.894316152642351e-06
-Error ratio:  15.091049658279672 
-
+RGN rel. error: 3.0e-07
+SR rel. error: 3.9e-06
 Delta =  1.0
-RGN rel. error:  3.2683336989996155e-06
-SR rel. error:  1.1573045207677341e-05
-Error ratio:  3.540961931524821 
-
+RGN rel. error: 3.3e-06
+SR rel. error: 1.2e-05
 Delta =  1.5
-RGN rel. error:  1.985814670884594e-05
-SR rel. error:  5.3999283603371536e-05
-Error ratio:  2.719250914755162 
+RGN rel. error: 2.0e-05
+SR rel. error: 5.4e-05
 
+20 x 20 TFI model
 h =  2.0
-SR:  -2.511306101987316
-SR sigma:  2.3208466696850104e-06
-RGN:  -2.5113068722193113
-RGN sigma:  5.114945493798545e-07 
-
+SR 200 iterations: -2.3375353
+SR 1000 iterations: -2.5113061
+RGN 200 iterations: -2.5113056
+RGN 1000 iterations: -2.5113069
 h =  3.0
-SR:  -3.1950034917352395
-SR sigma:  8.115247341557154e-06
-RGN:  -3.1949974138903294
-RGN sigma:  1.0375511546900283e-05 
-
+SR 200 iterations: -3.1899006
+SR 1000 iterations: -3.1950035
+RGN 200 iterations: -3.1949262
+RGN 1000 iterations: -3.1949974
 h =  4.0
-SR:  -4.13383523333706
-SR sigma:  1.1332574567022298e-06
-RGN:  -4.133835438636457
-RGN sigma:  2.0018887569348524e-07 
-
+SR 200 iterations: -4.1337097
+SR 1000 iterations: -4.1338352
+RGN 200 iterations: -4.1335964
+RGN 1000 iterations: -4.1338354

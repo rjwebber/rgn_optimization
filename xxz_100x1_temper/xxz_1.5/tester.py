@@ -35,6 +35,8 @@ T = 20 # number of steps per MC chain
 
 # rgn
 rgn = True
+# rgn
+lm = False
 # sr
 sr = True
 # gd
@@ -134,6 +136,7 @@ def sample_less(inputs, i):
 def update(inputs, i):
     (states, currents, key, features2, bias) = inputs
     key, key1, key2, key3, key4, key5, key6, key7 = random.split(key, num = 8)
+
     # update
     i0 = jnp.arange(parallel)
     perturbs = jax.ops.index_update(states, jax.ops.index[:, ::2], ~states[:, ::2])
@@ -151,11 +154,12 @@ def update(inputs, i):
     # accept or reject moves
     futures = jnp.real(jansatz(perturbs, features2, bias))
     accept = random.exponential(key3, shape = (parallel,))
-    # accept = (futures - currents > -.5*accept)
     accept = (1-temper)*(futures - currents) > -.5*accept
+    accept2 = jnp.broadcast_to(accept[:, jnp.newaxis], (parallel, d))
     # update information
-    states = (states & ~accept[:, jnp.newaxis]) | (perturbs & accept[:, jnp.newaxis])
-    currents = currents * ~accept + futures * accept  
+    currents = jnp.where(accept, futures, currents)
+    states = jnp.where(accept2, perturbs, states)
+
     # swap 0
     key4 = random.split(key4, num = parallel // temps)
     perturbs = vmap(random.permutation, in_axes = (0, None), out_axes = 0)(key4, states_old)
@@ -166,33 +170,35 @@ def update(inputs, i):
     # accept or reject moves
     futures = jnp.real(jansatz(perturbs, features2, bias))
     accept = random.exponential(key5, shape = (parallel // temps,))
-    # accept = (futures - currents > -.5*accept)
     accept = (futures - currents[-(parallel // temps):])/temps > -.5*accept
+    accept2 = jnp.broadcast_to(accept[:, jnp.newaxis], (parallel // temps, d))
     # update information
-    perturbs = (states[-(parallel // temps):, :] & ~accept[:, jnp.newaxis]) | (perturbs & accept[:, jnp.newaxis])
-    states = jax.ops.index_update(states, jax.ops.index[-(parallel // temps):, :], perturbs)
-    futures = currents[-(parallel // temps):] * ~accept + futures * accept
+    futures = jnp.where(accept, futures, currents[-(parallel // temps):])
     currents = jax.ops.index_update(currents, jax.ops.index[-(parallel // temps):], futures)
+    perturbs = jnp.where(accept2, perturbs, states[-(parallel // temps):, :])
+    states = jax.ops.index_update(states, jax.ops.index[-(parallel // temps):, :], perturbs)
+
     # swap 1
     accept = random.exponential(key6, shape = part2.shape)
     diffs = currents[part1a] - currents[part2]
     accept = diffs > -.5*accept*temps
     currents = jax.ops.index_add(currents, jax.ops.index[part2], diffs*accept)
     currents = jax.ops.index_add(currents, jax.ops.index[part1a], -diffs*accept)
-    accept = accept[:, jnp.newaxis]
-    perturbs1 = states[part2, :] * ~accept + states[part1a, :] * accept
-    perturbs2 = states[part2, :] * accept + states[part1a, :] * ~accept
+    accept = jnp.broadcast_to(accept[:, jnp.newaxis], (part2.size, d))
+    perturbs1 = jnp.where(accept, states[part1a, :], states[part2, :])
+    perturbs2 = jnp.where(accept, states[part2, :], states[part1a, :])
     states = jax.ops.index_update(states, jax.ops.index[part2], perturbs1)
     states = jax.ops.index_update(states, jax.ops.index[part1a], perturbs2)
+
     # swap 2
     accept = random.exponential(key7, shape = part2.shape)
     diffs = currents[part2] - currents[part1b]
     accept = diffs > -.5*accept*temps
     currents = jax.ops.index_add(currents, jax.ops.index[part1b], diffs*accept)
     currents = jax.ops.index_add(currents, jax.ops.index[part2], -diffs*accept)
-    accept = accept[:, jnp.newaxis]
-    perturbs1 = states[part1b, :] * ~accept + states[part2, :] * accept
-    perturbs2 = states[part1b, :] * accept + states[part2, :] * ~accept
+    accept = jnp.broadcast_to(accept[:, jnp.newaxis], (part2.size, d))
+    perturbs1 = jnp.where(accept, states[part2, :], states[part1b, :])
+    perturbs2 = jnp.where(accept, states[part1b, :], states[part2, :])
     states = jax.ops.index_update(states, jax.ops.index[part1b], perturbs1)
     states = jax.ops.index_update(states, jax.ops.index[part2], perturbs2)    
 
@@ -208,8 +214,8 @@ if rgn:
 
     # starting condition
     key = jnp.array(key_save)
-    weights = jnp.load('nrgn_weights.npy')[-1, :]
-    states = jnp.load('nrgn_save_1000.npy')
+    weights = jnp.load('rgn_weights.npy')[1000, :]
+    states = jnp.load('rgn_save_1000.npy')
     rgn_est = np.zeros(iterations) + 0j
 
     # test the energy
@@ -220,11 +226,35 @@ if rgn:
         print('Estimated energy: ', rgn_est[iteration]/d)
         if iteration % 100 == 0:
             if iteration > 0:
-                np.save('nrgn_test.npy', rgn_est)
+                np.save('rgn_test.npy', rgn_est)
                     
 #%%
 
-#===================
+# ==================
+# MCMC training - LM
+# ==================
+
+if lm:
+
+    # starting condition
+    key = jnp.array(key_save)
+    weights = jnp.load('lm_weights.npy')[1000, :]
+    states = jnp.load('lm_save_1000.npy')
+    lm_est = np.zeros(iterations) + 0j
+
+    # test the energy
+    for iteration in range(iterations):
+        print(iteration)
+        (states, key, store_energy) = parallel_data(states, key, weights)
+        lm_est[iteration] = jnp.mean(store_energy)
+        print('Estimated energy: ', lm_est[iteration]/d)
+        if iteration % 100 == 0:
+            if iteration > 0:
+                np.save('lm_test.npy', lm_est)
+                    
+#%%
+
+# ==================
 # MCMC training - SR
 # ==================
 
@@ -232,7 +262,7 @@ if sr:
 
     # starting condition
     key = jnp.array(key_save)
-    weights = jnp.load('sr_weights.npy')[-1, :]
+    weights = jnp.load('sr_weights.npy')[1000, :]
     states = jnp.load('sr_save_1000.npy')
     sr_est = np.zeros(iterations) + 0j
 
@@ -248,7 +278,7 @@ if sr:
                     
 #%%
 
-#===================
+# ==================
 # MCMC training - GD
 # ==================
 
@@ -256,7 +286,7 @@ if gd:
 
     # starting condition
     key = jnp.array(key_save)
-    weights = jnp.load('gd_weights.npy')[-1, :]
+    weights = jnp.load('gd_weights.npy')[1000, :]
     states = jnp.load('gd_save_1000.npy')
     gd_est = np.zeros(iterations) + 0j
 
